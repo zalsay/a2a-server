@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // A2A JSON-RPC error codes (spec-reserved range), mirroring the Python server.
@@ -18,6 +20,25 @@ const (
 
 func rpcError(code int, message string) map[string]interface{} {
 	return map[string]interface{}{"code": code, "message": message}
+}
+
+// taskOpErrCode maps a tasks.go operation error to its JSON-RPC code, or 0
+// when the error is not a task-operation error (caller turns it into a 500).
+func taskOpErrCode(err error) int {
+	msg := err.Error()
+	switch {
+	case strings.HasPrefix(msg, "task not found"):
+		return errTaskNotFound
+	case strings.HasPrefix(msg, "cannot claim"), strings.HasPrefix(msg, "cannot release"):
+		if strings.HasSuffix(msg, ": not found") {
+			return errTaskNotFound
+		}
+		return errTaskNotCancelable
+	case strings.HasPrefix(msg, "cannot set"):
+		return errTaskNotCancelable
+	default:
+		return 0
+	}
 }
 
 func agentCard(cfg config) map[string]interface{} {
@@ -133,6 +154,111 @@ func handleRPC(db *sql.DB, payload map[string]interface{}, reqID interface{}) (*
 			}}, nil
 		}
 		if err := cancelTask(db, id); err != nil {
+			return nil, err
+		}
+		updated, err := getTask(db, id)
+		if err != nil {
+			return nil, err
+		}
+		return &rpcOutcome{resp: map[string]interface{}{
+			"jsonrpc": "2.0", "id": reqID, "result": updated,
+		}}, nil
+
+	case "tasks/claim", "tasks/release":
+		id, _ := params["id"].(string)
+		var err error
+		if method == "tasks/claim" {
+			err = claimTask(db, id)
+		} else {
+			err = releaseTask(db, id)
+		}
+		if err != nil {
+			if code := taskOpErrCode(err); code != 0 {
+				return &rpcOutcome{resp: map[string]interface{}{
+					"jsonrpc": "2.0", "id": reqID,
+					"error": rpcError(code, err.Error()),
+				}}, nil
+			}
+			return nil, err
+		}
+		updated, err := getTask(db, id)
+		if err != nil {
+			return nil, err
+		}
+		return &rpcOutcome{resp: map[string]interface{}{
+			"jsonrpc": "2.0", "id": reqID, "result": updated,
+		}}, nil
+
+	case "tasks/complete", "tasks/fail", "tasks/need-input":
+		id, _ := params["id"].(string)
+		text, _ := params["message"].(string)
+		if text == "" {
+			return &rpcOutcome{resp: map[string]interface{}{
+				"jsonrpc": "2.0", "id": reqID,
+				"error": rpcError(errInvalidParams, fmt.Sprintf("%s needs a message", method)),
+			}}, nil
+		}
+		var arts []rpcArtifact
+		if v, ok := params["artifacts"]; ok && v != nil {
+			if method != "tasks/complete" {
+				return &rpcOutcome{resp: map[string]interface{}{
+					"jsonrpc": "2.0", "id": reqID,
+					"error": rpcError(errInvalidParams, "artifacts are only allowed for tasks/complete"),
+				}}, nil
+			}
+			list, ok := v.([]interface{})
+			if !ok {
+				return &rpcOutcome{resp: map[string]interface{}{
+					"jsonrpc": "2.0", "id": reqID,
+					"error": rpcError(errInvalidParams, "artifacts must be a list"),
+				}}, nil
+			}
+			for _, item := range list {
+				m, ok := item.(map[string]interface{})
+				if !ok {
+					return &rpcOutcome{resp: map[string]interface{}{
+						"jsonrpc": "2.0", "id": reqID,
+						"error": rpcError(errInvalidParams, "each artifact needs a name"),
+					}}, nil
+				}
+				name, _ := m["name"].(string)
+				if name == "" {
+					return &rpcOutcome{resp: map[string]interface{}{
+						"jsonrpc": "2.0", "id": reqID,
+						"error": rpcError(errInvalidParams, "each artifact needs a name"),
+					}}, nil
+				}
+				b64, _ := m["bytes"].(string)
+				if b64 == "" {
+					return &rpcOutcome{resp: map[string]interface{}{
+						"jsonrpc": "2.0", "id": reqID,
+						"error": rpcError(errInvalidParams, fmt.Sprintf("artifact %s: bytes must be a base64 string", name)),
+					}}, nil
+				}
+				if _, err := base64.StdEncoding.DecodeString(b64); err != nil {
+					return &rpcOutcome{resp: map[string]interface{}{
+						"jsonrpc": "2.0", "id": reqID,
+						"error": rpcError(errInvalidParams, fmt.Sprintf("artifact %s: bytes must be base64", name)),
+					}}, nil
+				}
+				mt, _ := m["mimeType"].(string)
+				if mt == "" {
+					mt = "application/octet-stream"
+				}
+				arts = append(arts, rpcArtifact{Name: name, MimeType: mt, Bytes: b64})
+			}
+		}
+		state := map[string]string{
+			"tasks/complete": "completed", "tasks/fail": "failed",
+			"tasks/need-input": "input-required",
+		}[method]
+		if err := finishTaskRPC(db, id, state, text, arts); err != nil {
+			if code := taskOpErrCode(err); code != 0 {
+				return &rpcOutcome{resp: map[string]interface{}{
+					"jsonrpc": "2.0", "id": reqID,
+					"error": rpcError(code, err.Error()),
+				}}, nil
+			}
 			return nil, err
 		}
 		updated, err := getTask(db, id)

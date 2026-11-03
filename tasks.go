@@ -322,6 +322,69 @@ func cancelTask(db *sql.DB, id string) error {
 // finishTask implements complete/fail/need-input: allowed only from working
 // or submitted, appends a result artifact and an agent history message.
 func finishTask(db *sql.DB, id, state, resultText string, artifactFiles []string) error {
+	extra := []interface{}{}
+	for _, path := range artifactFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+		if i := strings.Index(mt, ";"); i >= 0 {
+			mt = mt[:i]
+		}
+		if mt == "" {
+			mt = "application/octet-stream"
+		}
+		type filePart struct {
+			Kind string `json:"kind"`
+			File struct {
+				Name     string `json:"name"`
+				MimeType string `json:"mimeType"`
+				Bytes    string `json:"bytes"`
+			} `json:"file"`
+		}
+		fp := filePart{Kind: "file"}
+		fp.File.Name = filepath.Base(path)
+		fp.File.MimeType = mt
+		fp.File.Bytes = base64.StdEncoding.EncodeToString(data)
+		extra = append(extra, fp)
+	}
+	return finishTaskWithParts(db, id, state, resultText, extra)
+}
+
+// rpcArtifact is one file part for tasks/complete over JSON-RPC, mirroring
+// CLI --artifact-file (name + base64 bytes instead of a disk path).
+type rpcArtifact struct {
+	Name     string
+	MimeType string
+	Bytes    string // base64, validated by the caller
+}
+
+// finishTaskRPC is the JSON-RPC twin of finishTask: same state rules and
+// result artifact, but artifact parts come from base64 payloads.
+func finishTaskRPC(db *sql.DB, id, state, resultText string, arts []rpcArtifact) error {
+	extra := []interface{}{}
+	for _, a := range arts {
+		type filePart struct {
+			Kind string `json:"kind"`
+			File struct {
+				Name     string `json:"name"`
+				MimeType string `json:"mimeType"`
+				Bytes    string `json:"bytes"`
+			} `json:"file"`
+		}
+		fp := filePart{Kind: "file"}
+		fp.File.Name = a.Name
+		fp.File.MimeType = a.MimeType
+		fp.File.Bytes = a.Bytes
+		extra = append(extra, fp)
+	}
+	return finishTaskWithParts(db, id, state, resultText, extra)
+}
+
+// finishTaskWithParts is the shared transaction behind finishTask and
+// finishTaskRPC: parts[0] is the result text, extraParts are file parts.
+func finishTaskWithParts(db *sql.DB, id, state, resultText string, extraParts []interface{}) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -340,33 +403,8 @@ func finishTask(db *sql.DB, id, state, resultText string, artifactFiles []string
 	if curState != "working" && curState != "submitted" {
 		return fmt.Errorf("cannot set %s to %s: state=%s", id, state, curState)
 	}
-	type filePart struct {
-		Kind string `json:"kind"`
-		File struct {
-			Name     string `json:"name"`
-			MimeType string `json:"mimeType"`
-			Bytes    string `json:"bytes"`
-		} `json:"file"`
-	}
 	parts := []interface{}{map[string]interface{}{"kind": "text", "text": resultText}}
-	for _, path := range artifactFiles {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		mt := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
-		if i := strings.Index(mt, ";"); i >= 0 {
-			mt = mt[:i]
-		}
-		if mt == "" {
-			mt = "application/octet-stream"
-		}
-		fp := filePart{Kind: "file"}
-		fp.File.Name = filepath.Base(path)
-		fp.File.MimeType = mt
-		fp.File.Bytes = base64.StdEncoding.EncodeToString(data)
-		parts = append(parts, fp)
-	}
+	parts = append(parts, extraParts...)
 	var artItems []json.RawMessage
 	if err := json.Unmarshal([]byte(artifacts), &artItems); err != nil {
 		return err

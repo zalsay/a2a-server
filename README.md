@@ -54,10 +54,19 @@ Copy `config.example.json` to `config.json` and fill in the token.
 - `GET /health`, public, returns task counts by state
 - `POST /` JSON-RPC 2.0, requires `Authorization: Bearer <token>`:
   `message/send`, `message/stream` (SSE), `tasks/get`, `tasks/cancel`,
-  `tasks/list` (small documented extension, not core A2A)
+  `tasks/list` (small documented extension, not core A2A), plus the worker
+  methods `tasks/claim`, `tasks/release`, `tasks/complete`, `tasks/fail`,
+  `tasks/need-input` (same semantics as the CLI subcommands; added for a
+  remote worker that polls `tasks/list` and reports back over HTTP).
+  `tasks/complete` takes `{"id", "message", "artifacts"?}` where each
+  artifact is `{"name", "mimeType"?, "bytes" (base64)}` and folds into the
+  `result` artifact exactly like CLI `--artifact-file`; `tasks/fail` and
+  `tasks/need-input` take `{"id", "message"}` and reject artifacts.
 
 Error codes follow the A2A spec range: task not found `-32001`,
-not cancelable `-32002`; unauthorized requests return HTTP 401.
+state forbids the operation `-32002` (cancel on a terminal task, claim on
+a non-submitted task, finish on a non-working/non-submitted task);
+unauthorized requests return HTTP 401 with a `-32001` body.
 
 ## Compatibility with the Python version
 
