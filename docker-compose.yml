@@ -1,0 +1,44 @@
+# A2A server — container deployment (mount the prebuilt binary)
+#
+# The binary is NOT built inside the container. Build it once on any
+# glibc Linux machine (or download it from the GitHub release assets),
+# then mount it read-only into a go-runtime container:
+#
+#   go build -o bin/a2a .            # from the repo root, or
+#   # download https://github.com/zalsay/a2a-server/releases/download/<tag>/a2a
+#   #   -> bin/a2a, then verify: sha256sum bin/a2a
+#
+# Directory layout next to this file:
+#   docker-compose.yml
+#   bin/a2a            # prebuilt binary (NOT committed to the repo)
+#   a2a-data/
+#     config.json      # copy of config.example.json with the real token (NOT committed)
+#     tasks.db         # created on first run, persists here
+#
+# NOTE on the base image: the binary is dynamically linked against glibc
+# (CGO + mattn/go-sqlite3, verified with `ldd`). The container MUST be
+# glibc-based (Debian/Ubuntu/golang). It will NOT run on alpine or scratch.
+services:
+  a2a:
+    image: golang:1.27-bookworm
+    container_name: a2a-server
+    restart: unless-stopped
+    # Host loopback only by default (same posture as the systemd service).
+    # Change to "9877:9877" to expose it on all host interfaces.
+    ports:
+      - "127.0.0.1:9877:9877"
+    environment:
+      A2A_DIR: /data
+    volumes:
+      - ./bin/a2a:/usr/local/bin/a2a:ro
+      - ./a2a-data:/data
+    # --host 0.0.0.0 is REQUIRED in a container: the service binds 127.0.0.1
+    # by default, which would reject Docker-forwarded traffic (forwarded
+    # connections arrive at the container IP, not loopback).
+    command: ["/usr/local/bin/a2a", "serve", "--host", "0.0.0.0", "--port", "9877"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/9877"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

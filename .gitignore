@@ -1,4 +1,6 @@
 /a2a
+/bin/
+/a2a-data/
 /tasks.db
 /tasks.db-wal
 /tasks.db-shm

@@ -74,6 +74,12 @@ not cancelable `-32002`; unauthorized requests return HTTP 401.
   match Python's `mimetypes` output; JSON object key order may differ
   (semantically irrelevant).
 
+## Deployment
+
+See [DEPLOY.md](DEPLOY.md): run the prebuilt binary inside a go-runtime
+container via a read-only mount (`docker-compose.yml`), or run it directly.
+Releases are built by `.github/workflows/release.yml` on every `v*` tag.
+
 ## systemd
 
 ```ini
