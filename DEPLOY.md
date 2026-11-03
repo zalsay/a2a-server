@@ -91,6 +91,13 @@ See the systemd unit in README.md for a persistent setup.
 
 ## Releases (how the binary gets to GitHub)
 
+> Note: the workflow file itself cannot be pushed through the GitHub App
+> API (the integration lacks the Workflows permission, so the API rejects
+> any tree containing `.github/workflows/` files). If
+> `.github/workflows/release.yml` is missing from the repo, add it via the
+> GitHub web UI (Add file → Upload files) using the file from the source
+> tree, then the flow below works as described.
+
 The connector used to publish this repo cannot upload binary blobs
 (it rejects non-UTF-8 content), so releases are built by automation:
 `.github/workflows/release.yml` builds the binary on every `v*` tag push
